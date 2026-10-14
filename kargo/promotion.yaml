@@ -9,6 +9,12 @@ spec:
     value: https://github.com/nitishfy/kargo-demo
   - name: imageRepo
     value: public.ecr.aws/nginx/nginx
+  - name: kargoUrl
+    value: https://dl8o8ewvf3qjzbgb.kargo.training.akuity.cloud
+  - name: approvalStage
+    value: test
+  - name: stageUrl
+    value: ${{ vars.kargoUrl }}/project/${{ ctx.project }}/stage/${{ ctx.stage }}
   steps:
   - uses: git-clone
     config:
@@ -33,11 +39,70 @@ spec:
     config:
       path: ./src/stages/${{ ctx.stage }}
       outPath: ./out
+  - uses: send-message
+    as: notify-approval-requested
+    if: ${{ success() && ctx.stage == vars.approvalStage }}
+    continueOnError: true
+    config:
+      channel:
+        kind: ClusterMessageChannel
+        name: email
+      message: |
+        Approval is required to promote nginx:${{ imageFrom(vars.imageRepo).Tag }} to ${{ ctx.stage }}.
+
+        Project:    ${{ ctx.project }}
+        Stage:      ${{ ctx.stage }}
+        Image:      ${{ vars.imageRepo }}:${{ imageFrom(vars.imageRepo).Tag }}
+        Freight:    ${{ ctx.targetFreight.name }}
+        Promotion:  ${{ ctx.promotion }}
+        Requested:  ${{ ctx.meta.promotion.actor }}
+
+        The rendered manifests are ready. Nothing will be committed or deployed
+        until this promotion is approved.
+
+        Review and approve or reject: ${{ vars.stageUrl }}
+      smtp:
+        subject: "[Action required] Approve nginx:${{ imageFrom(vars.imageRepo).Tag }} to ${{ ctx.stage }}"
+        html: false
+  - uses: wait-for-approval
+    as: approve
+    if: ${{ success() && ctx.stage == vars.approvalStage }}
+  - uses: send-message
+    as: notify-approved
+    if: ${{ success() && ctx.stage == vars.approvalStage }}
+    continueOnError: true
+    config:
+      channel:
+        kind: ClusterMessageChannel
+        name: email
+      message: |
+        Promotion of nginx:${{ imageFrom(vars.imageRepo).Tag }} to ${{ ctx.stage }} was approved and is now being deployed.
+
+        Approved by:
+        ${{ join(map(filter(task.outputs.approve.responses, .action == "approve"), "- " + .user + " at " + .time + (.message == nil ? "" : ": " + .message)), "\n") }}
+
+        Promotion:  ${{ ctx.promotion }}
+        Freight:    ${{ ctx.targetFreight.name }}
+
+        Track the rollout: ${{ vars.stageUrl }}
+      smtp:
+        subject: "[Approved] nginx:${{ imageFrom(vars.imageRepo).Tag }} to ${{ ctx.stage }}"
+        html: false
   - uses: git-commit
     as: commit
     config:
       path: ./out
-      message: ${{ task.outputs['update-image'].commitMessage }}
+      message: |
+        chore(${{ ctx.stage }}): promote nginx to ${{ imageFrom(vars.imageRepo).Tag }}
+
+        ${{ task.outputs['update-image'].commitMessage }}
+
+        Kargo-Project: ${{ ctx.project }}
+        Kargo-Stage: ${{ ctx.stage }}
+        Kargo-Freight: ${{ ctx.targetFreight.name }}
+        Kargo-Promotion: ${{ ctx.promotion }}
+        Promoted-By: ${{ ctx.meta.promotion.actor }}
+        ${{ ctx.stage == vars.approvalStage ? "Approved-By: " + join(map(filter(task.outputs.approve.responses, .action == "approve"), .user), ", ") : "Approval: not required" }}
   - uses: git-push
     config:
       path: ./out
@@ -48,6 +113,46 @@ spec:
         sources:
         - repoURL: ${{ vars.gitopsRepo }}
           desiredRevision: ${{ task.outputs.commit.commit }}
+  - uses: send-message
+    as: notify-succeeded
+    continueOnError: true
+    config:
+      channel:
+        kind: ClusterMessageChannel
+        name: email
+      message: |
+        nginx:${{ imageFrom(vars.imageRepo).Tag }} was deployed to ${{ ctx.stage }}.
+
+        Commit:     ${{ task.outputs.commit.commit }}
+        Branch:     stage/${{ ctx.stage }}
+        Argo CD:    kargo-demo-${{ ctx.stage }}
+        Promotion:  ${{ ctx.promotion }}
+        Freight:    ${{ ctx.targetFreight.name }}
+
+        ${{ vars.stageUrl }}
+      smtp:
+        subject: "[Deployed] nginx:${{ imageFrom(vars.imageRepo).Tag }} to ${{ ctx.stage }}"
+        html: false
+  - uses: send-message
+    as: notify-failed
+    if: ${{ failure() }}
+    continueOnError: true
+    config:
+      channel:
+        kind: ClusterMessageChannel
+        name: email
+      message: |
+        Promotion of nginx:${{ imageFrom(vars.imageRepo).Tag }} to ${{ ctx.stage }} failed or was rejected.
+        If the failure happened before the git push, stage/${{ ctx.stage }} was not changed.
+        If it happened during the Argo CD sync, the new commit is on the branch but may not be live.
+
+        Promotion:  ${{ ctx.promotion }}
+        Freight:    ${{ ctx.targetFreight.name }}
+
+        See the failing step and its error: ${{ vars.stageUrl }}
+      smtp:
+        subject: "[Failed] nginx:${{ imageFrom(vars.imageRepo).Tag }} to ${{ ctx.stage }}"
+        html: false
 
 ---
 
