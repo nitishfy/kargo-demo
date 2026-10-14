@@ -22,7 +22,7 @@ spec:
         targetRevision: stage/{{stage}}
         path: .
       destination:
-        server: https://kubernetes.default.svc
+        name: kargo-demo
         namespace: kargo-demo-{{stage}}
       syncPolicy:
         syncOptions:
